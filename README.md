@@ -5,8 +5,10 @@ Research Question: How do housing property characteristics and location affect h
 
 ### Team members:
 Leyi He (94652260)
+
 Xiaomeng Zhou (67409466)
-Ruodan Deng
+
+Ruodan Deng (29414646)
 
 ### Repository structure:
 - proposal: project proposal
