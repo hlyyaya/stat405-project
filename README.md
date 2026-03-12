@@ -1,5 +1,7 @@
 # stat405-project
-## Topic: Bayesian modelling of 
+## Topic: Bayesian Analysis of Housing Prices: The Role of Property Characteristics and Location
+
+Research Question: How do housing property characteristics and location affect housing prices?
 
 ### Team members:
 Leyi He (94652260)
