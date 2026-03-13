@@ -10,11 +10,11 @@
 
 1. ### **Main Dataset**
 
-### We use the **Bengaluru House Price Data** as the main dataset, which contains residential housing records from Bengaluru, India. The dataset is publicly available on Kaggle and is commonly used for housing price analysis and prediction tasks. The original dataset contains 13,320 observations and 9 variables, with house price as the main response variable. The variables describe different structural and location-related characteristics of residential properties.
+We use the **Bengaluru House Price Data** as the main dataset, which contains residential housing records from Bengaluru, India. The dataset is publicly available on Kaggle and is commonly used for housing price analysis and prediction tasks. The original dataset contains 13,320 observations and 9 variables, with house price as the main response variable. The variables describe different structural and location-related characteristics of residential properties.
 
 ### The original variables include:
 
-* ### area\_type: type of area measurement 
+* area\_type: type of area measurement 
 
 * availability: availability status of the property
 
