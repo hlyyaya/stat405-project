@@ -1,0 +1,256 @@
+---
+title: "Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-04-09"
+---
+
+# How are housing property characteristics and location associated with housing prices?
+
+We study how housing characteristics and location affect housing prices using Bayesian regression models. The response variable is log-transformed to reduce skewness and stabilize variance.
+
+## Data cleaning
+```{r}
+library(ggplot2)
+library(dplyr)
+
+data <- read.csv("/Users/heleyi/Downloads/Bengaluru_House_Price_Data(main).csv")
+head(data)
+
+# 1. Remove column with too many missing values
+data$society <- NULL
+
+# 2. Extract numeric bedrooms from size
+data$bedrooms <- as.numeric(gsub("[^0-9]", "", data$size))
+
+# 3. Clean total_sqft
+convert_sqft <- function(x) {
+  if (grepl("-", x)) {
+    nums <- as.numeric(unlist(strsplit(x, "-")))
+    return(mean(nums))
+  } else if (grepl("^[0-9.]+$", x)) {
+    return(as.numeric(x))
+  } else {
+    return(NA)
+  }
+}
+
+data$sqft <- sapply(data$total_sqft, convert_sqft)
+
+# 4. Transform balcony 
+data$balcony <- factor(data$balcony, levels = c(0,1,2,3))
+
+# 5. Remove rows with missing key variables
+data <- data[!is.na(data$sqft), ]
+data <- data[!is.na(data$bath), ]
+data <- data[!is.na(data$balcony), ]
+data <- data[!is.na(data$bedrooms), ]
+data <- data[!is.na(data$location), ]
+data <- data[data$sqft > 0, ]
+
+# 6. Frequency-based grouping for location
+location_counts <- data %>%
+  group_by(location) %>%
+  tally(sort = TRUE)
+
+top_18_names <- head(location_counts$location, 18)
+
+data <- data %>%
+  mutate(location_grouped = case_when(
+    location %in% top_18_names ~ as.character(location),
+    location_counts$n[match(location, location_counts$location)] >= 30 ~ "Other_Established",
+    TRUE ~ "Other_Sparse"
+  ))
+
+# Convert to factor
+all_levels <- c(as.character(top_18_names), "Other_Established", "Other_Sparse")
+data$location_grouped <- factor(data$location_grouped, levels = all_levels)
+
+# 7. Log-transform variables
+data$log_price <- log(data$price)
+data$log_sqft  <- log(data$sqft)  
+
+
+# 8. Keep relevant variables
+clean_data <- data[, c("log_price",
+                       "log_sqft",
+                       "balcony",
+                       "location_grouped")]
+
+# 9. Rename columns
+colnames(clean_data) <- c("log_price",
+                          "log_sqft",
+                          "balcony",
+                          "location")
+
+# 10. Save cleaned dataset
+write.csv(clean_data, "clean_housing.csv", row.names = FALSE)
+
+# 11. Check data
+head(clean_data)
+table(clean_data$location)
+
+```
+
+
+
+
+
+# Model 1: Bayesian Linear Regression
+
+## Data transformation
+
+Both housing prices and square footage are typically right-skewed, so we apply log transformations to both variables:
+
+\[
+y_i = \log(\text{price}_i)
+\]
+\[
+x_{i1} = \log(\text{total\_sqft}_i)
+\]
+
+- Balcony is treated as a categorical variable with four levels: \(\text{balcony}_i \in \{0,1,2,3\}\)
+- We construct dummy variables with balcony = 0 as the reference category:
+
+\[
+D_{ik} = 
+\begin{cases} 
+1 & \text{if balcony}_i = k \\
+0 & \text{otherwise}
+\end{cases}
+\]
+for \(k \in \{1, 2, 3\}\).
+
+We assume:
+\[
+y_i \sim \mathcal{N}(\mu_i, \sigma^2)
+\]
+
+Linear model
+
+\[
+\mu_i = \beta_0 + \beta_1 \log(\text{total\_sqft}_i) + \beta_2 D_{i1} + \beta_3 D_{i2} + \beta_4 D_{i3}
+\]
+
+## Priors
+
+### Exploratory Data Analysis (EDA)
+1. log(sqrt(sqft)) vs log(price)
+```{r}
+
+ggplot(data, aes(x = log_sqft, y = log_price)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "log(sqft) vs log(price)")
+```
+
+Interpretation: 
+The slope is clearly positive
+This indicates that as size increases, price increases monotonically
+The relationship is smooth and strictly increasing
+
+From exploratory data analysis (EDA), we observe a strong positive linear relationship between these log-transformed variables.
+
+2. Balcony vs log(price)
+```{r}
+ggplot(data, aes(x = balcony, y = log_price)) +
+  geom_boxplot() +
+  labs(title = "Balcony vs log(price)")
+```
+Boxplots reveal that the effect of balconies is not strictly increasing (e.g., the median price for one balcony is slightly lower than for zero balconies). A Normal prior centered at zero allows the model to capture both positive and negative marginal effects.
+
+Therefore, we set the prior distribution as:
+
+\[
+\beta_0 \sim \mathcal{N}(0, 10^2)
+\]
+
+\[
+\beta_1 \sim \text{Gamma}(2, 1)
+\]
+
+\[
+\beta_2, \beta_3, \beta_4 \sim \mathcal{N}(0, 2^2)
+\]
+
+\[
+\sigma \sim \text{Exponential}(2)
+\]
+
+Interpretation
+
+- \(\beta_0\): Baseline log price for properties with balcony = 0.
+- \(\beta_1\): Strictly positive elasticity-like effect of square footage on price.
+- \(\beta_2, \beta_3, \beta_4\): Discrete balcony effects relative to the baseline. This specification allows for non-linear trends where more balconies do not necessarily lead to higher prices.
+
+
+# Model 2: Hierarchical Bayesian Model (Location Effects)
+
+## Motivation
+
+Housing prices vary significantly across locations. To capture spatial heterogeneity while avoiding overfitting, we introduce location-specific intercepts with partial pooling.
+
+## Location structure
+
+Given the long-tail distribution of housing locations (over 2,000 unique entries), we categorize them into 20 groups ($j[i] \in \{1, \dots, 20\}$) to balance spatial granularity with statistical reliability:
+
+* Top 18 Locations: The 18 most frequent neighborhoods are modeled individually to capture their specific market premiums.
+* Other (Established): Locations with 30 or more observations that did not make the top 18. This group represents relatively stable but less frequent areas.
+* Other (Sparse): Locations with fewer than 30 observations. 
+
+This group helps isolate high-variance noise and uncleaned data outliers, preventing them from biasing the core location estimates.
+
+```{r}
+ggplot(data, aes(x = reorder(location_grouped, log_price, FUN = median), y = log_price)) +
+  geom_boxplot(aes(fill = location_grouped), outlier.alpha = 0.2) +
+  coord_flip() +
+  labs(title = "Log Price Distribution: Top 18 vs Refined Other Tiers",
+       x = "Location Group",
+       y = "Log Price") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Model specification
+
+\[
+y_i \sim \mathcal{N}(\mu_i, \sigma^2)
+\]
+
+\[
+\mu_i = \alpha_{j[i]} + \beta_1 \log(\text{total\_sqft}_i) + \beta_2 D_{i1} + \beta_3 D_{i2} + \beta_4 D_{i3}
+\]
+
+### Hierarchical structure
+
+\[
+\alpha_j \sim \mathcal{N}(\mu_\alpha, \tau^2)
+\]
+\[
+\mu_\alpha \sim \mathcal{N}(0, 10^2)
+\]
+\[
+\tau \sim \text{Exponential}(2)
+\]
+
+### Coefficient priors
+
+We maintain the specialized priors for the structural characteristics to ensure consistency between models:
+
+\[
+\beta_1 \sim \text{Gamma}(2, 1)
+\]
+\[
+\beta_2, \beta_3, \beta_4 \sim \mathcal{N}(0, 2^2)
+\]
+\[
+\sigma \sim \text{Exponential}(2)
+\]
+
+## Interpretation
+
+- \(\alpha_j\): Baseline price level for each location group. The hierarchical structure allows for "information borrowing," where sparse locations are pulled toward the global mean $\mu_\alpha$.
+- \(\tau\): Degree of variation across different housing markets.
+- \(\beta_2, \beta_3, \beta_4\): Discrete balcony effects adjusted for location-specific baselines.
+
