@@ -1,0 +1,345 @@
+---
+title: "Project"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-04-09"
+---
+
+# How are housing property characteristics and location associated with housing prices?
+
+We study how housing characteristics and location affect housing prices using Bayesian regression models. The response variable is log-transformed to reduce skewness and stabilize variance.
+
+## Data cleaning
+```{r}
+library(ggplot2)
+library(dplyr)
+
+data <- read.csv("Bengaluru_House_Price_Data(main).csv")
+head(data)
+
+# 1. Remove column with too many missing values
+data$society <- NULL
+
+# 2. Extract numeric bedrooms from size
+data$bedrooms <- as.numeric(gsub("[^0-9]", "", data$size))
+
+# 3. Clean total_sqft
+convert_sqft <- function(x) {
+  if (grepl("-", x)) {
+    nums <- as.numeric(unlist(strsplit(x, "-")))
+    return(mean(nums))
+  } else if (grepl("^[0-9.]+$", x)) {
+    return(as.numeric(x))
+  } else {
+    return(NA)
+  }
+}
+
+data$sqft <- sapply(data$total_sqft, convert_sqft)
+
+# 4. Transform balcony 
+data$balcony <- factor(data$balcony, levels = c(0,1,2,3))
+
+# 5. Remove rows with missing key variables
+data <- data[!is.na(data$sqft), ]
+data <- data[!is.na(data$bath), ]
+data <- data[!is.na(data$balcony), ]
+data <- data[!is.na(data$bedrooms), ]
+data <- data[!is.na(data$location), ]
+data <- data[data$sqft > 0, ]
+
+# 6. Frequency-based grouping for location
+location_counts <- data %>%
+  group_by(location) %>%
+  tally(sort = TRUE)
+
+top_18_names <- head(location_counts$location, 18)
+
+data <- data %>%
+  mutate(location_grouped = case_when(
+    location %in% top_18_names ~ as.character(location),
+    location_counts$n[match(location, location_counts$location)] >= 30 ~ "Other_Established",
+    TRUE ~ "Other_Sparse"
+  ))
+
+# Convert to factor
+all_levels <- c(as.character(top_18_names), "Other_Established", "Other_Sparse")
+data$location_grouped <- factor(data$location_grouped, levels = all_levels)
+
+# 7. Log-transform variables
+data$log_price <- log(data$price)
+data$log_sqft  <- log(data$sqft)  
+
+
+# 8. Keep relevant variables
+clean_data <- data[, c("log_price",
+                       "log_sqft",
+                       "balcony",
+                       "location_grouped")]
+
+# 9. Rename columns
+colnames(clean_data) <- c("log_price",
+                          "log_sqft",
+                          "balcony",
+                          "location")
+
+# 10. Save cleaned dataset
+write.csv(clean_data, "clean_housing.csv", row.names = FALSE)
+
+# 11. Check data
+head(clean_data)
+table(clean_data$location)
+
+```
+
+```{r, message=FALSE}
+library(rstan)
+
+clean_data$balcony <- factor(clean_data$balcony, levels = c(0,1,2,3))
+
+# Create 3 dummy variables (baseline = balcony 0)
+Z <- model.matrix(~ balcony, data = clean_data)[, -1]
+
+# The data for Stan
+stan_data <- list(
+  N = nrow(clean_data),
+  log_price = clean_data$log_price,
+  log_sqft = clean_data$log_sqft,
+  balcony_dummies = Z
+)
+
+# Fit model using Stan 
+fit <- stan(
+  file = "model1.stan",
+  data = stan_data,
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  seed = 123,
+  refresh = 0
+)
+
+```
+
+
+```{r}
+# Posterior means
+post <- rstan::extract(fit)
+
+beta0_hat <- mean(post$beta0)
+beta1_hat <- mean(post$beta1)
+beta_balcony_hat <- colMeans(post$beta_balcony)
+sigma_hat <- mean(post$sigma)
+
+beta0_hat
+beta1_hat
+beta_balcony_hat
+sigma_hat
+
+# credible intervals
+beta0_ci <- quantile(post$beta0, probs = c(0.025, 0.975))
+beta1_ci <- quantile(post$beta1, probs = c(0.025, 0.975))
+beta_balcony_ci <- apply(post$beta_balcony, 2, quantile, probs = c(0.025, 0.975))
+sigma_ci <- quantile(post$sigma, probs = c(0.025, 0.975))
+
+beta0_ci
+beta1_ci
+beta_balcony_ci
+sigma_ci
+```
+```{r}
+traceplot(fit, pars = "beta0")
+traceplot(fit, pars = "beta1")
+traceplot(fit, pars = "sigma")
+
+traceplot(fit, pars = "beta_balcony[1]")
+traceplot(fit, pars = "beta_balcony[2]")
+traceplot(fit, pars = "beta_balcony[3]")
+```
+```{r}
+# summary diagnostics
+diag_summary <- summary(
+  fit,
+  pars = c("beta0", "beta1", "beta_balcony", "sigma"),
+  probs = c(0.025, 0.5, 0.975)
+)$summary
+
+diag_summary[, c("mean", "sd", "n_eff", "Rhat")]
+```
+```{r, message=FALSE}
+# Synthetic data validation
+
+# known true parameters
+beta0_true <- -3.90
+beta1_true <- 1.16
+beta_balcony_true <- c(-0.14, -0.13, -0.05)
+sigma_true <- 0.47
+
+# simulate synthetic response
+mu_syn <- beta0_true + beta1_true * clean_data$log_sqft + Z %*% beta_balcony_true
+log_price_syn <- rnorm(nrow(clean_data), mean = mu_syn, sd = sigma_true)
+
+stan_data_syn <- list(
+  N = nrow(clean_data),
+  log_price = as.vector(log_price_syn),
+  log_sqft = clean_data$log_sqft,
+  balcony_dummies = Z
+)
+
+fit_syn <- stan(
+  file = "model1.stan",
+  data = stan_data_syn,
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  seed = 123,
+  refresh = 0
+)
+```
+
+```{r}
+post_syn <- rstan::extract(fit_syn)
+
+# compare true values with posterior means
+recovery_table <- data.frame(
+  Parameter = c("beta0", "beta1", "beta_balcony1", "beta_balcony2", "beta_balcony3", "sigma"),
+  True = c(beta0_true, beta1_true, beta_balcony_true, sigma_true),
+  Estimate = c(
+    mean(post_syn$beta0),
+    mean(post_syn$beta1),
+    colMeans(post_syn$beta_balcony),
+    mean(post_syn$sigma)
+  )
+)
+
+recovery_table
+```
+
+```{r, message=FALSE}
+library(cmdstanr)
+library(posterior)
+
+# 
+
+mod <- cmdstan_model("model1.stan")
+
+fit_vi <- mod$variational(
+  data = stan_data,
+  seed = 123,
+  algorithm = "meanfield",
+  output_samples = 2000,
+  refresh = 0,
+  show_messages = FALSE,
+  show_exceptions = FALSE
+)
+```
+
+```{r}
+draws_df <- as_draws_df(fit_vi$draws())
+
+beta0_vi <- mean(draws_df$beta0)
+beta1_vi <- mean(draws_df$beta1)
+sigma_vi <- mean(draws_df$sigma)
+
+beta_balcony_vi <- c(
+  mean(draws_df$`beta_balcony[1]`),
+  mean(draws_df$`beta_balcony[2]`),
+  mean(draws_df$`beta_balcony[3]`)
+)
+
+beta0_vi
+beta1_vi
+beta_balcony_vi
+sigma_vi
+```
+```{r}
+# credible intervals
+beta0_vi_ci <- quantile(draws_df$beta0, probs = c(0.025, 0.975))
+beta1_vi_ci <- quantile(draws_df$beta1, probs = c(0.025, 0.975))
+sigma_vi_ci <- quantile(draws_df$sigma, probs = c(0.025, 0.975))
+
+beta_balcony_vi_ci <- rbind(
+  quantile(draws_df$`beta_balcony[1]`, probs = c(0.025, 0.975)),
+  quantile(draws_df$`beta_balcony[2]`, probs = c(0.025, 0.975)),
+  quantile(draws_df$`beta_balcony[3]`, probs = c(0.025, 0.975))
+)
+beta0_vi_ci
+beta1_vi_ci
+sigma_vi_ci
+beta_balcony_vi_ci
+```
+
+```{r}
+compare_table <- data.frame(
+  Parameter = c("beta0", "beta1", "beta_balcony1", "beta_balcony2", "beta_balcony3", "sigma"),
+  MCMC = c(beta0_hat, beta1_hat, beta_balcony_hat, sigma_hat),
+  VI = c(beta0_vi, beta1_vi, beta_balcony_vi, sigma_vi)
+)
+
+compare_table
+```
+
+```{r, message=FALSE}
+# Synthetic data validation (VI)
+
+beta0_true_vi <- -2.38
+beta1_true_vi <- 0.96
+beta_balcony_true_vi <- c(-0.19, -0.13, -0.012)
+sigma_true_vi <- 0.47
+
+# simulate synthetic response
+mu_syn_vi <- beta0_true_vi + beta1_true_vi * clean_data$log_sqft + Z %*% beta_balcony_true_vi
+log_price_syn_vi <- rnorm(nrow(clean_data), mean = mu_syn_vi, sd = sigma_true_vi)
+
+stan_data_syn_vi <- list(
+  N = nrow(clean_data),
+  log_price = as.vector(log_price_syn_vi),
+  log_sqft = clean_data$log_sqft,
+  balcony_dummies = Z
+)
+
+# fit VI on synthetic data
+fit_vi_syn <- mod$variational(
+  data = stan_data_syn_vi,
+  seed = 123,
+  algorithm = "meanfield",
+  output_samples = 2000,
+  refresh = 0,
+  show_messages = FALSE,
+  show_exceptions = FALSE
+)
+
+```
+
+```{r}
+draws_syn_vi <- as_draws_df(fit_vi_syn$draws())
+
+# compare true values with posterior means
+recovery_table_vi <- data.frame(
+  Parameter = c("beta0", "beta1", "beta_balcony1", "beta_balcony2", "beta_balcony3", "sigma"),
+  True_vi = c(beta0_true_vi, beta1_true_vi, beta_balcony_true_vi, sigma_true_vi),
+  Estimate_vi = c(
+    mean(draws_syn_vi$beta0),
+    mean(draws_syn_vi$beta1),
+    mean(draws_syn_vi$`beta_balcony[1]`),
+    mean(draws_syn_vi$`beta_balcony[2]`),
+    mean(draws_syn_vi$`beta_balcony[3]`),
+    mean(draws_syn_vi$sigma)
+  )
+)
+
+recovery_table_vi[,-1] <- round(recovery_table_vi[,-1], 4)
+recovery_table_vi
+```
+
+
+
+
+
+
+
+
+
+
+
